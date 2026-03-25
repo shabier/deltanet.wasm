@@ -1,0 +1,22 @@
+# Build output
+build/
+*.o
+*.a
+
+# WASM artifacts (built, not committed)
+*.wasm
+*.js
+!build.sh
+
+# Models
+*.gguf
+*.bin
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
