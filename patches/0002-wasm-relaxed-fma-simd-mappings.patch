@@ -1,0 +1,35 @@
+wasm: single-instruction relaxed FMA for GGML_F32x4_FMA
+
+The WASM path in ggml-cpu/simd-mappings.h defined GGML_F32x4_FMA as a
+separate multiply then add. Every other ggml CPU backend contracts this
+into a fused multiply-add (AVX2 _mm256_fmadd_ps, NEON vfmaq_f32). Under
+-mrelaxed-simd, wasm_f32x4_relaxed_madd is the same instruction class.
+
+This macro is the inner op of ggml_vec_dot_f32 / ggml_vec_mad_f32, on the
+hot path of the Gated Delta Net CPU kernel (18 of 24 layers of
+Qwen3.5-Next) and the F16 attention dots. Guarded by __wasm_relaxed_simd__
+so non-relaxed builds keep the strict mul+add. Same accuracy class as FMA
+on x86/ARM, so model output stays coherent (deterministic, sha-stable).
+
+Measured: +1.9% decode tok/s, applied on top of the EMSCRIPTEN_SYSTEM_PROCESSOR
+=wasm + -mrelaxed-simd build. Applied automatically by build.sh.
+
+diff --git a/ggml/src/ggml-cpu/simd-mappings.h b/ggml/src/ggml-cpu/simd-mappings.h
+index 0deda93..a90546d 100644
+--- a/ggml/src/ggml-cpu/simd-mappings.h
++++ b/ggml/src/ggml-cpu/simd-mappings.h
+@@ -786,7 +786,14 @@ static inline unsigned char ggml_endian_byte(int i) {
+ #define GGML_F32x4_SET1(x)      wasm_f32x4_splat(x)
+ #define GGML_F32x4_LOAD         wasm_v128_load
+ #define GGML_F32x4_STORE        wasm_v128_store
++#if defined(__wasm_relaxed_simd__)
++// True fused multiply-add: one instruction instead of mul+add, same accuracy
++// class as AVX2 _mm256_fmadd_ps / NEON vfmaq_f32. relaxed_madd(a,b,c)=a*b+c,
++// so to match the strict form (b*c + a) we pass (b, c, a).
++#define GGML_F32x4_FMA(a, b, c) wasm_f32x4_relaxed_madd(b, c, a)
++#else
+ #define GGML_F32x4_FMA(a, b, c) wasm_f32x4_add(wasm_f32x4_mul(b, c), a)
++#endif
+ #define GGML_F32x4_ADD          wasm_f32x4_add
+ #define GGML_F32x4_MUL          wasm_f32x4_mul
+ #define GGML_F32x4_REDUCE(res, x)                  \

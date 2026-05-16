@@ -1,7 +1,9 @@
 #include "llama.h"
 #include "ggml.h"
+#include "ggml-cpu.h"
 #include <cstdio>
 #include <string>
+#include <thread>
 #include <vector>
 #include <algorithm>
 #include <emscripten/bind.h>
@@ -10,6 +12,23 @@ static llama_model * g_model = nullptr;
 static llama_context * g_ctx = nullptr;
 static llama_sampler * g_smpl = nullptr;
 static const llama_vocab * g_vocab = nullptr;
+static ggml_threadpool_t g_pool = nullptr;
+static int g_user_threads = 0; // 0 = auto
+static int g_user_poll = -1;   // -1 = use ggml default (50)
+
+static int pick_threads() {
+    if (g_user_threads > 0) return g_user_threads;
+    unsigned hc = std::thread::hardware_concurrency();
+    if (hc == 0) return 4;
+    // SMT desktops report 2x physical cores; oversubscribing matmul threads
+    // costs ~10% vs running on physical core count. Treat >8 logical as SMT
+    // and halve. Apple Silicon / mobile typically <=8 logical with no SMT, so
+    // keep the full count there.
+    return hc > 8 ? (int) (hc / 2) : (int) hc;
+}
+
+void setThreads(int n) { g_user_threads = n; }
+void setPoll(int p) { g_user_poll = p; }
 
 bool loadModel(const std::string & path, int n_ctx) {
     ggml_backend_load_all();
@@ -20,17 +39,29 @@ bool loadModel(const std::string & path, int n_ctx) {
 
     g_vocab = llama_model_get_vocab(g_model);
 
+    const int n_threads = pick_threads();
+
     llama_context_params cparams = llama_context_default_params();
     cparams.n_ctx = n_ctx;
     cparams.n_batch = 2048;
-    cparams.n_threads = 8;
-    cparams.n_threads_batch = 8;
+    cparams.n_threads = n_threads;
+    cparams.n_threads_batch = n_threads;
     cparams.no_perf = true;
     g_ctx = llama_init_from_model(g_model, cparams);
     if (!g_ctx) {
         llama_model_free(g_model);
         g_model = nullptr;
         return false;
+    }
+
+    // Create a persistent threadpool and attach it. Without this, ggml creates
+    // a disposable threadpool per llama_decode() call — pthread_create x (N-1)
+    // per token in WASM, which is meaningful overhead.
+    ggml_threadpool_params tp = ggml_threadpool_params_default(n_threads);
+    if (g_user_poll >= 0) tp.poll = (uint32_t) g_user_poll;
+    g_pool = ggml_threadpool_new(&tp);
+    if (g_pool) {
+        llama_attach_threadpool(g_ctx, g_pool, g_pool);
     }
 
     auto sparams = llama_sampler_chain_default_params();
@@ -84,13 +115,16 @@ void resetContext() {
 
 void freeModel() {
     if (g_smpl) { llama_sampler_free(g_smpl); g_smpl = nullptr; }
-    if (g_ctx) { llama_free(g_ctx); g_ctx = nullptr; }
+    if (g_ctx) { llama_detach_threadpool(g_ctx); llama_free(g_ctx); g_ctx = nullptr; }
+    if (g_pool) { ggml_threadpool_free(g_pool); g_pool = nullptr; }
     if (g_model) { llama_model_free(g_model); g_model = nullptr; }
     g_vocab = nullptr;
 }
 
 EMSCRIPTEN_BINDINGS(deltanet_wasm) {
     emscripten::function("loadModel", &loadModel);
+    emscripten::function("setThreads", &setThreads);
+    emscripten::function("setPoll", &setPoll);
     emscripten::function("tokenize", &tokenize);
     emscripten::function("decodePrompt", &decodePrompt);
     emscripten::function("generateToken", &generateToken);

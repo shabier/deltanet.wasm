@@ -20,3 +20,6 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+bench-cache/
+# local cross-hardware browser harness, not a repo deliverable
+bench-web/
