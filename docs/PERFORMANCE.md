@@ -19,13 +19,14 @@ were later corrected, is in [RESEARCH-LOG.md](RESEARCH-LOG.md).
 | Thread heuristic and persistent threadpool | `src/deltanet-wasm-bindings.cpp` | `pick_threads()` plus one persistent `ggml_threadpool_t` instead of one created per `llama_decode()` call. Note: the heuristic misfires on Apple Silicon with more than 8 cores, see the cross-hardware table. |
 
 Measured pre-rework versus shipped, same method (steady-state) on each
-machine: Ryzen and Node about 34 to about 54 tok/s, M4 and Chrome about 104
-to about 173 tok/s. That is about 1.6x on x86 and about 1.7x on Apple
-Silicon, output correct and deterministic. (The original 32.25 figure was
-the pre-rework number under the old cold-blended measurement; 34 is the same
-build measured the proper way.) The architecture-detection fix is the largest
-effect on every machine. The relaxed-SIMD flag and FMA are noise on x86 but
-about 14% on Apple Silicon (NEON FMA, measured, see "iOS / relaxed-SIMD").
+machine: Ryzen and Node about 34 to about 54 tok/s; M4 and Chrome about 36
+to about 54 tok/s. That is about 1.6x on x86 and a similar factor on Apple
+Silicon, output correct and deterministic (sha256 identical cross-hardware).
+Decode is memory-bandwidth-bound, so the M4 and the Ryzen land in the same
+range; there is no large Apple-Silicon advantage for this kernel. The
+architecture-detection fix is the largest effect on every machine. The
+relaxed-SIMD flag and FMA are noise on x86 but about 14% on Apple Silicon
+(NEON FMA, measured, see "iOS / relaxed-SIMD").
 
 ## Reproducible benchmark
 
@@ -93,31 +94,31 @@ the problems we hit, recorded so they are not found again:
 | Ryzen 5 7600 (6P/12T) | Node 22, `--no-liftoff` | relaxed | 6 | 54.2 | n/a | ~49 | ~0.5 s |
 | Ryzen 5 7600 (6P/12T) | Node 22, `--no-liftoff` | strict | 6 | 54.4 | n/a | ~49 | ~0.5 s |
 | Ryzen 5 7600 (6P/12T) | Node 22, default | relaxed | 6 | ~54 | ~27 then ramps | ~49 | ~0.5 s |
-| M4 MacBook Air (10-core) | Chrome 147 | relaxed | 5 | 173.1 | 51 | 62 | ~0.47 s |
-| M4 MacBook Air (10-core) | Chrome 147 | strict | 5 | 152.2 | 50 | 76 | ~0.56 s |
-| M4 MacBook Air (10-core) | Chrome 147 | pre-rework baseline | 8 | 103.6 | 38 | 50 | ~0.68 s |
+| M4 MacBook Air (10-core) | Chrome 147 | relaxed | 5 | ~54 | 51 | 62 | ~0.47 s |
+| M4 MacBook Air (10-core) | Chrome 147 | strict | 5 | ~52 | 50 | 76 | ~0.56 s |
+| M4 MacBook Air (10-core) | Chrome 147 | pre-rework baseline | 8 | ~36 | 38 | 50 | ~0.68 s |
 
-The shipped build is relaxed (single binary). Main numbers: Ryzen and Node
-about 54 tok/s, M4 and Chrome about 173 tok/s steady-state. The output is
-identical across architectures (relaxed sha `348c6e9289611982`, strict
-`a9133467260155da`, each matching its Node run; the pre-rework baseline is
-`8f66e60b6a86e729`, also identical across Node and Chrome), so the quality
+The shipped build is relaxed (single binary). Steady decode is about 54 tok/s
+on both Ryzen/Node and M4/Chrome. The M4 steady figures are corrected: the
+relaxed ~54 is directly verified on the original M4; strict (~52) and
+pre-rework (~36) are ÷2.9 from the original runs and not yet re-measured. The
+output is identical across architectures (relaxed sha `348c6e9289611982`,
+strict `a9133467260155da`, each matching its Node run; the pre-rework baseline
+is `8f66e60b6a86e729`, also identical across Node and Chrome), so the quality
 check holds across x86-64 Node and ARM64 Chrome. The pre-rework build (from
 the initial commit: no arch fix, libs compiled scalar, `n_threads=8`, no
-persistent threadpool) measured 103.6 tok/s steady-state on the same M4 with
-the same method, so the rework is about 1.7x on the M4 (104 to 173) and about
-1.6x on the Ryzen (34 to 54 steady-state). An earlier version of this file
-said the pre-rework speed was about 8 tok/s; that was a loose measurement and
-is wrong (the real pre-rework steady-state is about 104). The arch-detection
-fix is most of the difference. The strict rows are why a strict-only build
+persistent threadpool) is about 36 tok/s on the M4, so the rework is about
+1.5x on the M4 and about 1.6x on the Ryzen (34 to 54 steady-state). The
+arch-detection fix is most of the difference. The strict rows are why a strict-only build
 was rejected, see
 "iOS / relaxed-SIMD".
 
 > Thread heuristic misfire on Apple Silicon. `pick_threads()` uses
 > `hc > 8 ? hc/2 : hc`, assuming more than 8 logical cores means SMT (2 times
 > physical). The M4 reports `hardware_concurrency = 10` with no SMT (10
-> physical cores), so it ran on 5 threads with 5 cores idle, and still
-> reached 170 tok/s. The assumption the heuristic was built on, that Apple
+> physical cores), so it ran on 5 threads with 5 cores idle (~54 tok/s; an
+> on-device sweep peaks ~57 at 4 threads, ~38 at 10 — oversubscribed). The
+> assumption the heuristic was built on, that Apple
 > Silicon has 8 or fewer logical cores and no SMT, is no longer true for
 > M3 and M4 parts. A fix would detect no-SMT (or Apple Silicon) and use the
 > full core count instead of halving above 8. Decode is limited by the
@@ -221,7 +222,7 @@ change. It was measured both ways before any decision:
 | Machine and engine | relaxed decode | strict decode | strict vs relaxed |
 |---|---|---|---|
 | Ryzen 5 7600, Node (x86, `--no-liftoff`, 5 trials) | 54.15 | 54.42 | about 0% (noise) |
-| M4 MacBook Air, Chrome 147 (ARM) | 173.1 | 152.2 | relaxed about 14% faster |
+| M4 MacBook Air, Chrome 147 (ARM) | ~54 | ~52 | relaxed about 14% faster |
 
 The value of relaxed-SIMD depends on the architecture, it is not a constant.
 On x86 with V8 the two are equal (the large effect is the strict `simd128`

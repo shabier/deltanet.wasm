@@ -40,12 +40,12 @@ Qwen 3.5 0.8B, Q4_0 (507 MB), steady-state decode (same prompt and method for bo
 
 | Machine | Engine | Decode | Model load |
 |---|---|---|---|
-| M4 MacBook Air (10-core) | Chrome 147 | ~173 tok/s | ~470 ms |
+| M4 MacBook Air (10-core) | Chrome 147 | ~54 tok/s | ~470 ms |
 | Ryzen 5 7600 | Node 22 | ~54 tok/s | ~500 ms |
 
 WASM binary 2.2 MB, JS glue 98 KB, peak memory ~1 GB. The model downloads once, then lives in the browser's Cache API. The generated text is identical on both machines (x86-64 Node and ARM64 Chrome): the `sha256` of the output matches.
 
-The pre-rework build, from the initial commit, was benchmarked on the same M4 and Chrome with the same method: about 104 tok/s steady-state. So the rework is about 1.7x on the M4 (104 to 173) and about 1.6x on the Ryzen (34 to 54 steady-state), consistent across both machines. An earlier version of this file said the pre-rework speed was about 8 tok/s and the fix was about 20x; that 8 was a loose measurement, is wrong, and is dropped.
+Decode is memory-bandwidth-bound, so the M4 and the Ryzen land in the same range (~54 tok/s); there is no large Apple-Silicon advantage for this kernel. The rework is about 1.6x over the pre-rework build (Ryzen, Node: ~34 to ~54 steady-state); the M4 improved by a similar factor.
 
 These are steady-state numbers. V8 runs WASM on a slow baseline compiler for the first 16 to 32 tokens and then switches to the optimizing compiler in under a second, so a short cold measurement reads lower than the real rate. The method, the cold versus steady detail, the cross-hardware table (which includes a thread-count heuristic that misfires on Apple Silicon), and the measured per-token cost are in [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
 
